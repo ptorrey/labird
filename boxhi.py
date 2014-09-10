@@ -5,14 +5,18 @@ import numpy as np
 import os.path as path
 import fieldize
 import numexpr as ne
-import cold_gas
-import subfindhdf
+import spb_common.cold_gas as cold_gas
+import spb_common.subfindhdf as subfindhdf
 from halohi import HaloHI,calc_binned_median,calc_binned_percentile
-import hdfsim
+import spb_common.hdfsim as hdfsim
 from brokenpowerfit import powerfit
 import h5py
-import hsml
+import spb_common.hsml as hsml
 from _fieldize_priv import _find_halo_kernel,_Discard_SPH_Fieldize
+
+from mpi4py import MPI
+import time
+import gc
 
 class BoxHI(HaloHI):
     """Class for calculating a large grid encompassing the whole simulation.
@@ -24,7 +28,7 @@ class BoxHI(HaloHI):
         reload_file - Ignore saved files if true
         nslice - number of slices in the z direction to divide the box into.
     """
-    def __init__(self,snap_dir,snapnum,nslice=1,reload_file=False,savefile=None,gas=False, molec=True, start=0, end=3000, ngrid=16384):
+    def __init__(self,snap_dir,snapnum,nslice=1,reload_file=False,savefile=None, savepath=None, gas=False, molec=True, start=0, end=3000, ngrid=16384, comm=None, this_task=0, n_tasks=1):
         self.snapnum=snapnum
         self.snap_dir=snap_dir
         self.molec = molec
@@ -33,7 +37,10 @@ class BoxHI(HaloHI):
         self.end = int(end)
         if savefile==None:
             savefile = "boxhi_grid_H2.hdf5"
-        self.savefile = path.join(snap_dir,"snapdir_"+str(snapnum).rjust(3,'0'),savefile)
+	if savepath==None:
+	    savepath = "./"
+
+        self.savefile = path.join(savepath,savefile)
         self.tmpfile = self.savefile+"."+str(self.start)+".tmp"
         if gas:
             self.tmpfile+=".gas"
@@ -51,12 +58,21 @@ class BoxHI(HaloHI):
             #Grid size constant
             self.ngrid=ngrid*np.ones(self.nhalo)
             self.sub_nHI_grid=np.zeros([self.nhalo, ngrid,ngrid])
+	    self.sub_nTotal_grid=np.zeros([self.nhalo, ngrid,ngrid])
             try:
                 thisstart = self.load_tmp()
             except IOError:
                 print "Could not load file"
                 thisstart = self.start
-            self.set_nHI_grid(gas, thisstart)
+
+            self.set_nHI_grid(False, 0, comm=comm, this_task=this_task, n_tasks=n_tasks )			# want to move this here... no need for halohi...
+	    self.set_nHI_grid(True, 0,  comm=comm, this_task=this_task, n_tasks=n_tasks ) 
+
+
+	    print "saving file with full grid.  This could take a while if using the whole grid!"
+	    if this_task==0:
+	        self.save_file(save_grid=True)
+
             #Account for molecular fraction
             #This is done on the HI density now
             #self.set_stellar_grid()
@@ -64,12 +80,70 @@ class BoxHI(HaloHI):
             #self.sub_nHI_grid+=np.log10(1.-self.h2frac(10**self.sub_nHI_grid, self.sub_star_grid))
         else:
             #try to load from a file
+	    print "loading from save file"
             self.load_savefile(self.savefile)
         return
 
-    def save_file(self, save_grid=False, LLS_cut = 17., DLA_cut = 20.3):
+
+    def save_file(self, save_grid=True, LLS_cut = 17., DLA_cut = 20.3):
         """Save the file, by default without the grid"""
-        HaloHI.save_file(self,save_grid)
+#        HaloHI.save_file(self,save_grid)
+
+        f=h5py.File(self.savefile,'w')
+        grp = f.create_group("HaloData")
+
+        grp.attrs["redshift"]	=self.redshift
+        grp.attrs["hubble"]	=self.hubble
+        grp.attrs["box"]	=self.box
+        grp.attrs["npart"]	=self.npart
+        grp.attrs["omegam"]	=self.omegam
+        grp.attrs["omegal"]	=self.omegal
+        grp.create_dataset("ngrid",data=self.ngrid)
+        grp.create_dataset('sub_cofm',data=self.sub_cofm)
+        grp.create_dataset('sub_radii',data=self.sub_radii)
+        try:
+            grp.attrs["minpart"]=self.minpart
+            grp.create_dataset('sub_mass',data=self.sub_mass)
+            grp.create_dataset('halo_ind',data=self.ind)
+        except AttributeError:
+            pass
+        try:
+            grp.attrs["pDLA"]=self.pDLA
+            grp.attrs["Rho_DLA"]=self.Rho_DLA
+            grp.attrs["Omega_DLA"]=self.Omega_DLA
+            grp.create_dataset('cddf_bins',data=self.cddf_bins)
+            grp.create_dataset('cddf_f_N',data=self.cddf_f_N)
+        except AttributeError:
+            pass
+
+        if save_grid:
+            try:
+                self.sub_nHI_grid
+            except AttributeError:
+                self.load_hi_grid()
+
+            grp_grid = f.create_group("GridHIData")
+            for i in xrange(0,self.nhalo):
+                try:
+		    grp_grid.attrs["nslice"]	= self.nhalo
+		    grp_grid.attrs["ngrid"]	= self.ngrid
+                    grp_grid.create_dataset(str(i),data=self.sub_nHI_grid[i].astype('f4'))
+                except AttributeError:
+		    print "failed to write GridHIData"
+                    pass
+
+	    grp_grid = f.create_group("GridTotData")
+	    for i in xrange(0,self.nhalo):
+                try:
+		    grp_grid.attrs["nslice"]    = self.nhalo
+                    grp_grid.attrs["ngrid"]     = self.ngrid
+                    grp_grid.create_dataset(str(i),data=self.sub_nTotal_grid[i].astype('f4'))
+                except AttributeError:
+                    pass
+
+        f.close()
+
+
         #Save a list of DLA positions instead
         f=h5py.File(self.savefile,'r+')
         ind = np.where(self.sub_nHI_grid > DLA_cut)
@@ -81,12 +155,161 @@ class BoxHI(HaloHI):
         grp.create_dataset("LLS_val",data=self.sub_nHI_grid[ind_LLS])
         f.close()
 
+
+    def load_savefile(self,savefile=None):
+        """Load data from a file"""
+        #Name of savefile
+        try:
+            f=h5py.File(savefile,'r')
+        except IOError:
+            raise IOError("Could not open "+savefile)
+        grid_file=f["HaloData"]
+        #if  not (grid_file.attrs["minpart"] == self.minpart):
+        #    raise KeyError("File not for this structure")
+        #Otherwise...
+        self.redshift=grid_file.attrs["redshift"]
+        self.omegam=grid_file.attrs["omegam"]
+        self.omegal=grid_file.attrs["omegal"]
+        self.hubble=grid_file.attrs["hubble"]
+        self.box=grid_file.attrs["box"]
+        self.npart=grid_file.attrs["npart"]
+        self.ngrid = np.array(grid_file["ngrid"])
+        try:
+            self.sub_mass = np.array(grid_file["sub_mass"])
+            self.ind=np.array(grid_file["halo_ind"])
+            self.nhalo=np.size(self.ind)
+            self.minpart = grid_file.attrs["minpart"]
+        except KeyError:
+            pass
+        try:
+            self.pDLA = grid_file.attrs["pDLA"]
+            self.Rho_DLA = grid_file.attrs["Rho_DLA"]
+            self.Omega_DLA = grid_file.attrs["Omega_DLA"]
+            self.cddf_bins = np.array(grid_file["cddf_bins"])
+            self.cddf_f_N = np.array(grid_file["cddf_f_N"])
+        except KeyError:
+            pass
+
+	try:
+	    print "loading GridHIData"
+	    grp_grid=f["GridHIData"]
+	    self.nslice=grp_grid.attrs["nslice"]
+	    self.nhalo = self.nslice
+	    self.ngrid =grp_grid.attrs["ngrid"]
+	    self.sub_nHI_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+	    for iii in np.arange(self.nslice):
+	        tmp = np.array(grp_grid[str(iii)])
+	        self.sub_nHI_grid[iii,:,:] = tmp		# need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
+	except:
+	    print "fail."
+	    pass
+
+        try:
+            print "loading GridTotData"
+            grp_grid=f["GridTotData"]
+            self.nslice=grp_grid.attrs["nslice"]
+            self.nhalo = self.nslice
+            self.ngrid =grp_grid.attrs["ngrid"]
+            self.sub_nTotal_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+            for iii in np.arange(self.nslice):
+                tmp = np.array(grp_grid[str(iii)])
+                self.sub_nTotal_grid[iii,:,:] = tmp                # need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
+        except:
+            print "fail."
+            pass
+
+        self.sub_cofm=np.array(grid_file["sub_cofm"])
+        self.sub_radii=np.array(grid_file["sub_radii"])
+
+        f.close()
+        del grid_file
+        del f
+
+
+
+
+#===============================#
+    def rho_LLS(self, thresh=17.5):
+        """Compute rho_LLS, the sum of the mass in DLAs. 
+           Units are 10^8 M_sun / Mpc^3 (comoving), like 0811.2003
+        """
+        try:
+            return self.Rho_LLS
+        except AttributeError:
+            rho_LLS = self._rho_LLS(thresh)  						#Avg density in g/cm^3 (comoving) / a^3 = physical
+            conv = 1e8 * self.SolarMass_in_g / (1e3 * self.UnitLength_in_cm)**3		# 1 g/cm^3 (physical) in 1e8 M_sun/Mpc^3	
+            self.Rho_LLS = rho_LLS / conv
+            return rho_LLS / conv
+
+    def omega_LLS(self, thresh=17.5, upthresh=20.3, fact=1, gas=False):
+        """Compute Omega_LLS, the sum of the neutral gas in LLSs, divided by the critical density.
+            Ω_LLS =  m_p * avg. column density / (1+z)^2 / length of column / rho_c / X_H
+            Note: If we want the neutral hydrogen density rather than the gas hydrogen density, multiply by 0.76,
+            the hydrogen mass fraction.			 """
+
+	val = fact*self._rho_LLS(thresh=thresh, upthresh=upthresh, gas=gas)/self.rho_crit()		# gas=False=neutral H, gas=true=tot gas mass
+	if gas:
+	    self.Omega_LLS_tot=val
+	else:
+	    self.Omega_LLS = val
+
+#        omega_LLS=fact*self._rho_LLS(thresh=thresh, upthresh=upthresh)/self.rho_crit()		#Avg density in g/cm^3 (comoving) divided by critical density in g/cm^3
+#	omega_LLS_tot=fact*self._rho_LLS(thresh=thresh, upthresh=upthresh, gas=True)/self.rho_crit()
+#        self.Omega_LLS = omega_LLS
+#	self.Omega_LLS_tot = omega_LLS_tot
+        return val
+
+
+    def _rho_LLS(self, thresh=17.5, upthresh=20.3, gas=False):
+        """Find the average density in DLAs in g/cm^3 (comoving). Helper for omega_DLA and rho_DLA."""
+        #Average column density of HI in atoms cm^-2 (physical)
+        try:
+            self.sub_nHI_grid
+        except AttributeError:
+            self.load_hi_grid()
+        if thresh > 0:
+	    condition_grid=self.sub_nHI_grid
+	    if gas:
+		mass_grid=self.sub_nTotal_grid
+	    else:
+                mass_grid=self.sub_nHI_grid
+            HImass = np.sum(10**mass_grid[np.where((condition_grid < upthresh)*(condition_grid > thresh))])/np.size(mass_grid)
+        else:
+            HImass = np.mean(10**self.sub_nHI_grid)
+        HImass = self.protonmass * HImass/(1+self.redshift)**2			# Avg. Column density of HI in g cm^-2 (comoving)
+        length = (self.box*self.UnitLength_in_cm/self.hubble/self.nhalo)	#Length of column in comoving cm
+        return HImass/length							#Avg density in g/cm^3 (comoving)
+
+
+    def line_density_LLS(self, thresh=17.5):
+        """Compute the line density, the total cells in LLSs divided by the total area, multiplied by d L / dX. This is dN/dX = l_DLA(z)
+        """
+        #P(hitting a DLA at random)
+        LLSs = 1.*np.sum(self.sub_nHI_grid > thresh)
+        size = 1.*np.sum(self.ngrid**2)
+        pLLS = LLSs/size/self.absorption_distance()
+        self.pLLS = pLLS
+        return pLLS
+
+    def line_density2_LLS(self,thresh=17.5):
+        """Compute the line density the other way, by summing the cddf. This is dN/dX = l_LLS(z)"""
+        (_,  fN) = self.column_density_function(minN=thresh,maxN=20.3)
+        NHI_table = 10**np.arange(thresh, 20.3, 0.2)
+        width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
+        return np.sum(fN*width)
+
+    def omega_LLS2(self,thresh=17.5):
+        """Compute Omega_LLS the other way, by summing the cddf."""
+        (center,  fN) = self.column_density_function(minN=thresh,maxN=20.3)
+        #f_N* NHI is returned, in amu/cm^2/dX
+        NHI_table = 10**np.arange(thresh, 20.3, 0.2)
+        width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
+        dXdcm = self.absorption_distance()/((self.box/self.nhalo)*self.UnitLength_in_cm/self.hubble)
+        return 1000*self.protonmass*np.sum(fN*center*width)*dXdcm/self.rho_crit()/(1+self.redshift)**2
+
+#==================================#
     def _find_particles_in_slab(self,ii,ipos,ismooth, mHI):
         """Find particles in the slab and convert their units to grid units"""
-        #At the moment any particle which is located in the slice is wholly in the slice:
-        #no periodicity or smoothing.
-        #Gather all particles in this slice
-        #Is the avg smoothing length is ~100 kpc and the slice is ~2.5 Mpc wide, this will be a small effect.
         jpos = self.sub_cofm[ii,0]
         jjpos = ipos[:,0]
         grid_radius = self.box/self.nhalo/2.
@@ -96,7 +319,6 @@ class BoxHI(HaloHI):
             return (None, None, None)
 
         ipos = ipos[indj]
-        # Update smooth and rho arrays as well:
         ismooth = ismooth[indj]
         mHI = mHI[indj]
 
@@ -111,6 +333,127 @@ class BoxHI(HaloHI):
         #Convert smoothing lengths to grid coordinates.
         return (coords, ismooth*cellspkpc, mHI)
 
+    def load_tmp(self):
+        """	Load a partially completed file	"""
+        print "Starting loading tmp file: "+str(self.tmpfile)
+        f = h5py.File(self.tmpfile,'r')
+        grp = f["GridHIData"]
+        [ grp[str(i)].read_direct(self.sub_nHI_grid[i]) for i in xrange(0,self.nhalo)]
+        location = f.attrs["file"]
+        f.close()
+        print "Successfully loaded tmp file. Next to do is:",location+1
+        return location+1
+
+    def _set_nHI_grid_single_file(self, file, gas=False):
+	star=cold_gas.RahmatiRT(self.redshift, self.hubble, molec=self.molec)
+
+	start_time = time.time()
+	f = h5py.File(file,"r")
+        bar=f["PartType0"]
+        ipos=np.array(bar["Coordinates"])
+        mass=np.array(bar["Masses"])
+        smooth = hsml.get_smooth_length(bar)
+        if not gas:                 # Hydrogen mass fraction
+            try:
+                mass *= np.array(bar["GFM_Metals"][:,0])
+            except KeyError:
+                mass *= self.hy_mass
+            mass *= star.get_reproc_HI(bar)
+
+#        ipos   = ipos[   :10000, :]
+#        smooth = smooth[ :100000   ]
+#        mass   = mass[   :100000   ]
+
+	end_time = time.time()
+
+	print "Snapshot loading done!  took "+str(end_time-start_time)+" seconds (starting to gridize)"
+	
+	if not gas:		# normal, neutral hydrogen projections
+            [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nHI_grid) for ii in xrange(0,self.nhalo)]
+	else:
+	    [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nTotal_grid) for ii in xrange(0,self.nhalo)]
+
+        f.close()
+        del ipos
+        del mass
+        del smooth
+
+    def set_nHI_grid(self, gas=False, start=0, comm=None, this_task=0, n_tasks=1):
+        """Set up the grid around each halo where the HI is calculated.
+        """
+        self.once=True
+        files = hdfsim.get_all_files(self.snapnum, self.snap_dir)
+        files.reverse()
+        end = np.min([np.size(files),self.end])
+        for xx in xrange(start, end):
+          if ((xx % n_tasks) == this_task):
+            ff = files[xx]
+	    print "Starting file "+str(ff)+" for nHI grid setup on task "+str(this_task)
+	    self._set_nHI_grid_single_file(ff, gas=gas)
+
+	print "task "+str(this_task)+" ready for MPI comm..."
+	comm.Barrier()
+
+	print self.sub_nHI_grid.shape
+
+	if 1:
+	    for this_slice in np.arange(self.nhalo):				# for each slice	
+		if not gas:
+		    local_grid   = self.sub_nHI_grid[this_slice,:,:]
+		else:
+		    local_grid   = self.sub_nTotal_grid[this_slice,:,:]
+
+                global_grid  = np.zeros( (self.ngrid[this_slice], self.ngrid[this_slice]) )		# create a global grid
+                comm.Barrier()
+#		comm.Allreduce(local_grid ,     global_grid,	op=MPI.SUM)	# dont need an Allreduce, reduce should work fine if rest is done on root
+		comm.Reduce(   local_grid ,	global_grid,	op=MPI.SUM,  root=0)
+
+		if this_task==0:
+                  if not gas:         # normal operation, looking at neutral hydrogen only
+                    self.sub_nHI_grid[this_slice,:,:] = global_grid		# only makes sense for root task, but can be done for all
+                  else:
+                    self.sub_nTotal_grid[this_slice,:,:] = global_grid
+
+
+	else:
+            global_grid  = np.zeros( self.sub_nHI_grid.shape )
+	    comm.Barrier()
+	    print "passed barrier, starting comm..."
+
+	    if not gas:		# normal operation, looking at neutral hydrogen only
+                comm.Allreduce(self.sub_nHI_grid ,               global_grid,                   op=MPI.SUM)
+	        self.sub_nHI_grid = global_grid
+	    else:
+	        comm.Allreduce(self.sub_nTotal_grid ,            global_grid,                   op=MPI.SUM)
+	        self.sub_nTotal_grid = global_grid
+
+
+	if this_task==0:
+	    print "final units (root task only)..."
+            #Deal with zeros: 0.1 will not even register for things at 1e17.
+            #Also fix the units:
+            #we calculated things in internal gadget /cell and we want atoms/cm^2
+            #So the conversion is mass/(cm/cell)^2
+	    if not gas:
+                for ii in xrange(0,self.nhalo):
+                    massg=self.UnitMass_in_g/self.hubble/self.protonmass
+                    epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
+                    self.sub_nHI_grid[ii]*=(massg/epsilon**2)
+                    self.sub_nHI_grid[ii]+=0.1
+                    np.log10(self.sub_nHI_grid[ii],self.sub_nHI_grid[ii])
+	    else:
+	        for ii in xrange(0,self.nhalo):
+                    massg=self.UnitMass_in_g/self.hubble/self.protonmass
+                    epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
+                    self.sub_nTotal_grid[ii]*=(massg/epsilon**2)
+                    self.sub_nTotal_grid[ii]+=0.1
+                    np.log10(self.sub_nTotal_grid[ii],self.sub_nTotal_grid[ii])
+
+	print "done with nHI loading routine..."
+	
+        return
+
+
     def sub_gridize_single_file(self,ii,ipos,ismooth,mHI,sub_nHI_grid,weights=None):
         """Helper function for sub_nHI_grid
             that puts data arrays loaded from a particular file onto the grid.
@@ -120,11 +463,25 @@ class BoxHI(HaloHI):
                 smooth - Smoothing lengths
                 sub_grid - Grid to add the interpolated data to
         """
+	start_time = time.time()
+	end_time = time.time()
         (coords, ismooth, mHI) = self._find_particles_in_slab(ii,ipos,ismooth, mHI)
         if coords == None:
             return
+
         fieldize.sph_str(coords,mHI,sub_nHI_grid[ii],ismooth,weights=weights, periodic=True)
+
+	npart=mHI.shape[0]
+	del coords
+	del ismooth
+	del mHI
+	gc.collect()
+
+	end_time = time.time()
+        print "fieldize done!  took "+str(end_time-start_time)+" seconds ("+str((end_time-start_time)/npart)+" seconds per particle)"
+
         return
+
 
     def set_stellar_grid(self):
         """Set up a grid around each halo containing the stellar column density
@@ -137,7 +494,7 @@ class BoxHI(HaloHI):
         files.reverse()
         for ff in files:
             f = h5py.File(ff,"r")
-            print "Starting file ",ff
+            print "Starting file for stellar grid setup",ff
             bar=f["PartType4"]
             ipos=np.array(bar["Coordinates"])
             #Get HI mass in internal units
@@ -182,7 +539,7 @@ class BoxHI(HaloHI):
         for xx in xrange(start,end):
             ff = files[xx]
             f = h5py.File(ff,"r")
-            print "Starting file ",ff
+            print "Starting file for zdir grid setup",ff
             bar=f["PartType0"]
             ipos=np.array(bar["Coordinates"])
             #Get HI mass in internal units
@@ -258,13 +615,10 @@ class BoxHI(HaloHI):
             the hydrogen mass fraction.
             The Noterdaeme results are GAS MASS
         """
-        try:
-            return self.Omega_DLA
-        except AttributeError:
-            #Avg density in g/cm^3 (comoving) divided by critical density in g/cm^3
-            omega_DLA=fact*self._rho_DLA(thresh, upthresh)/self.rho_crit()
-            self.Omega_DLA = omega_DLA
-            return omega_DLA
+        #Avg density in g/cm^3 (comoving) divided by critical density in g/cm^3
+        omega_DLA=fact*self._rho_DLA(thresh, upthresh)/self.rho_crit()
+        self.Omega_DLA = omega_DLA
+        return omega_DLA
 
     def _rho_DLA(self, thresh=20.3, upthresh=50.):
         """Find the average density in DLAs in g/cm^3 (comoving). Helper for omega_DLA and rho_DLA."""
@@ -284,6 +638,26 @@ class BoxHI(HaloHI):
         length = (self.box*self.UnitLength_in_cm/self.hubble/self.nhalo)
         #Avg density in g/cm^3 (comoving)
         return HImass/length
+
+    def _rho_DLA_tot(self, thresh=20.3, upthresh=50.):
+        """Find the average density in DLAs in g/cm^3 (comoving). Helper for omega_DLA and rho_DLA."""
+        #Average column density of HI in atoms cm^-2 (physical)
+        try:
+            self.sub_nHI_grid
+        except AttributeError:
+            self.load_hi_grid()
+        if thresh > 0:
+            grids=self.sub_nTotal_grid
+            HImass = np.sum(10**grids[np.where((grids < upthresh)*(grids > thresh))])/np.size(grids)
+        else:
+            HImass = np.mean(10**self.sub_nHI_grid)
+        #Avg. Column density of HI in g cm^-2 (comoving)
+        HImass = self.protonmass * HImass/(1+self.redshift)**2
+        #Length of column in comoving cm
+        length = (self.box*self.UnitLength_in_cm/self.hubble/self.nhalo)
+        #Avg density in g/cm^3 (comoving)
+        return HImass/length
+
 
     def get_omega_hi_mass_breakdown(self, rhohi=True):
         """Get the total HI mass density in DLAs in each halo mass bin.

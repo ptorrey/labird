@@ -7,18 +7,20 @@ Classes:
 """
 import numpy as np
 import numexpr as ne
-import halocat
-import hdfsim
+import spb_common.halocat as halocat
+import spb_common.hdfsim  as hdfsim
 import h5py
 import math
 import os.path as path
-import cold_gas
+import spb_common.cold_gas as cold_gas
 import halo_mass_function
 import fieldize
-import hsml
+import spb_common.hsml as hsml
 import scipy.integrate as integ
 import scipy.stats
 import mpfit
+from mpi4py import MPI
+
 
 def calc_binned_median(bin_edge,xaxis,data):
     """Calculate the median value of an array in some bins"""
@@ -264,6 +266,7 @@ class HaloHI:
 
     def save_tmp(self, location):
         """Save a partially completed file"""
+	print self.tmpfile
         f = h5py.File(self.tmpfile,'w')
         grp_grid = f.create_group("GridHIData")
         for i in xrange(0,self.nhalo):
@@ -272,67 +275,90 @@ class HaloHI:
         f.attrs["file"]=location
         f.close()
 
-    def load_tmp(self):
-        """
-        Load a partially completed file
-        """
-        print "Starting loading tmp file"
-        print self.tmpfile
-        f = h5py.File(self.tmpfile,'r')
-        grp = f["GridHIData"]
-        [ grp[str(i)].read_direct(self.sub_nHI_grid[i]) for i in xrange(0,self.nhalo)]
-        location = f.attrs["file"]
-        f.close()
-        print "Successfully loaded tmp file. Next to do is:",location+1
-        return location+1
+#    def load_tmp(self):
+#        """
+#        Load a partially completed file
+#        """
+#        print "Starting loading tmp file"
+#        print self.tmpfile
+#        f = h5py.File(self.tmpfile,'r')
+#        grp = f["GridHIData"]
+#        [ grp[str(i)].read_direct(self.sub_nHI_grid[i]) for i in xrange(0,self.nhalo)]
+#        location = f.attrs["file"]
+#        f.close()
+#        print "Successfully loaded tmp file. Next to do is:",location+1
+#        return location+1
+#
+#    def set_nHI_grid(self, gas=False, start=0, comm=None, this_task=0, n_tasks=1):
+#        """Set up the grid around each halo where the HI is calculated.
+#        """
+#        star=cold_gas.RahmatiRT(self.redshift, self.hubble, molec=self.molec)
+#        self.once=True
+#        #Now grid the HI for each halo
+#        files = hdfsim.get_all_files(self.snapnum, self.snap_dir)
+#        #Larger numbers seem to be towards the beginning
+#        files.reverse()
+#        restart = 10
+#        end = np.min([np.size(files),self.end])
+#        for xx in xrange(start, end):
+#	  if ((xx % n_tasks) == this_task):
+#            ff = files[xx]
+#            f = h5py.File(ff,"r")
+#            print "Starting file  for nHI grid setup "+ff+" on task "+str(this_task)
+#            bar=f["PartType0"]
+#            ipos=np.array(bar["Coordinates"])
+#	    print ipos.shape
+#            #Get HI mass in internal units
+#            mass=np.array(bar["Masses"])
+#            if not gas:
+#                #Hydrogen mass fraction
+#                try:
+#                    mass *= np.array(bar["GFM_Metals"][:,0])
+#                except KeyError:
+#                    mass *= self.hy_mass
+#                mass *= star.get_reproc_HI(bar)
+#
+#	    print "getting smoothing values..."
+#            smooth = hsml.get_smooth_length(bar)
+#
+#
+#	    # reduce data size for speed!   Undo for production!!! #
+#	    print "data has been pruned for speed tests!!!! need to undo for production runs!!!"
+#	    
+#	    #ipos = ipos[:1000, :]
+#	    #smooth = smooth[:1000]
+#	    #mass   = mass[ :1000]
+#	    
+#	    print "found smoothing values, doing some ish on the grid"
+ #           [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nHI_grid) for ii in xrange(0,self.nhalo)]
+#	    print self.sub_nHI_grid.min(), self.sub_nHI_grid.max()
+#            f.close()
+#            #Explicitly delete some things.
+#            del ipos
+#            del mass
+#            del smooth
 
-    def set_nHI_grid(self, gas=False, start=0):
-        """Set up the grid around each halo where the HI is calculated.
-        """
-        star=cold_gas.RahmatiRT(self.redshift, self.hubble, molec=self.molec)
-        self.once=True
-        #Now grid the HI for each halo
-        files = hdfsim.get_all_files(self.snapnum, self.snap_dir)
-        #Larger numbers seem to be towards the beginning
-        files.reverse()
-        restart = 10
-        end = np.min([np.size(files),self.end])
-        for xx in xrange(start, end):
-            ff = files[xx]
-            f = h5py.File(ff,"r")
-            print "Starting file ",ff
-            bar=f["PartType0"]
-            ipos=np.array(bar["Coordinates"])
-            #Get HI mass in internal units
-            mass=np.array(bar["Masses"])
-            if not gas:
-                #Hydrogen mass fraction
-                try:
-                    mass *= np.array(bar["GFM_Metals"][:,0])
-                except KeyError:
-                    mass *= self.hy_mass
-                mass *= star.get_reproc_HI(bar)
-            smooth = hsml.get_smooth_length(bar)
-            [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nHI_grid) for ii in xrange(0,self.nhalo)]
-            f.close()
-            #Explicitly delete some things.
-            del ipos
-            del mass
-            del smooth
-            if xx % restart == 0 or xx == end-1:
-                self.save_tmp(xx)
+##            if xx % restart == 0 or xx == end-1:
+##                self.save_tmp(xx)
 
-        #Deal with zeros: 0.1 will not even register for things at 1e17.
-        #Also fix the units:
-        #we calculated things in internal gadget /cell and we want atoms/cm^2
-        #So the conversion is mass/(cm/cell)^2
-        for ii in xrange(0,self.nhalo):
-            massg=self.UnitMass_in_g/self.hubble/self.protonmass
-            epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
-            self.sub_nHI_grid[ii]*=(massg/epsilon**2)
-            self.sub_nHI_grid[ii]+=0.1
-            np.log10(self.sub_nHI_grid[ii],self.sub_nHI_grid[ii])
-        return
+
+#	global_sub_nHI_grid = np.zeros( self.sub_nHI_grid.shape )
+#        comm.Barrier()
+#        comm.Allreduce(self.sub_nHI_grid ,               global_sub_nHI_grid,                   op=MPI.SUM)
+#	self.sub_nHI_grid = global_sub_nHI_grid	
+#
+#
+ #       #Deal with zeros: 0.1 will not even register for things at 1e17.
+#        #Also fix the units:
+#        #we calculated things in internal gadget /cell and we want atoms/cm^2
+#        #So the conversion is mass/(cm/cell)^2
+#        for ii in xrange(0,self.nhalo):
+#            massg=self.UnitMass_in_g/self.hubble/self.protonmass
+#            epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
+#            self.sub_nHI_grid[ii]*=(massg/epsilon**2)
+#            self.sub_nHI_grid[ii]+=0.1
+#            np.log10(self.sub_nHI_grid[ii],self.sub_nHI_grid[ii])
+#        return
 
     def _find_particles_near_halo(self, ii, ipos, ismooth, mHI):
         """Find the particles near a halo, paying attention to periodic box conditions"""
@@ -381,6 +407,7 @@ class HaloHI:
             self.once=False
         return (coords, ismooth*cellspkpc)
 
+
     def sub_gridize_single_file(self,ii,ipos,ismooth,mHI,sub_nHI_grid,weights=None):
         """Helper function for sub_nHI_grid
             that puts data arrays loaded from a particular file onto the grid.
@@ -391,6 +418,8 @@ class HaloHI:
                 sub_grid - Grid to add the interpolated data to
         """
         (ipos, ismooth, mHI) = self._find_particles_near_halo(ii, ipos, ismooth, mHI)
+	
+	print ii
 
         if np.size(ipos) == 0:
             return

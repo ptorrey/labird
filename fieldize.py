@@ -427,6 +427,13 @@ def cic_str(pos,value,field,in_radii,periodic=False):
 
 from _fieldize_priv import _SPH_Fieldize
 
+
+# this takes forever!!!!a
+#   Typical call: fieldize.sph_str(coords,mHI,sub_nHI_grid[ii],ismooth,weights=weights, periodic=True)
+
+
+
+
 def sph_str(pos,value,field,radii,weights=None,periodic=False):
     """Interpolate a particle onto a grid using an SPH kernel.
        This is similar to the cic_str() routine, but spherical.
