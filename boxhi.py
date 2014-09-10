@@ -66,7 +66,7 @@ class BoxHI(HaloHI):
                 thisstart = self.start
 
             self.set_nHI_grid(False, 0, comm=comm, this_task=this_task, n_tasks=n_tasks )			# want to move this here... no need for halohi...
-	    self.set_nHI_grid(True, 0,  comm=comm, this_task=this_task, n_tasks=n_tasks ) 
+	    self.set_nHI_grid(True,  0, comm=comm, this_task=this_task, n_tasks=n_tasks ) 
 
 
 	    print "saving file with full grid.  This could take a while if using the whole grid!"
@@ -116,32 +116,40 @@ class BoxHI(HaloHI):
         except AttributeError:
             pass
 
+	f.close()
+
         if save_grid:
             try:
                 self.sub_nHI_grid
             except AttributeError:
                 self.load_hi_grid()
 
-            grp_grid = f.create_group("GridHIData")
             for i in xrange(0,self.nhalo):
                 try:
+		    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(i)+'.hdf5'
+
+		    f=h5py.File(this_savefile,'w')
+		    grp_grid = f.create_group("GridHIData")
 		    grp_grid.attrs["nslice"]	= self.nhalo
 		    grp_grid.attrs["ngrid"]	= self.ngrid
                     grp_grid.create_dataset(str(i),data=self.sub_nHI_grid[i].astype('f4'))
+		    f.close()
+
                 except AttributeError:
 		    print "failed to write GridHIData"
                     pass
 
-	    grp_grid = f.create_group("GridTotData")
 	    for i in xrange(0,self.nhalo):
                 try:
+                    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(i)+'.hdf5'
+                    f=h5py.File(this_savefile,'w')
+		    grp_grid = f.create_group("GridTotData")
 		    grp_grid.attrs["nslice"]    = self.nhalo
                     grp_grid.attrs["ngrid"]     = self.ngrid
                     grp_grid.create_dataset(str(i),data=self.sub_nTotal_grid[i].astype('f4'))
+		    f.close()
                 except AttributeError:
                     pass
-
-        f.close()
 
 
         #Save a list of DLA positions instead
@@ -190,40 +198,53 @@ class BoxHI(HaloHI):
         except KeyError:
             pass
 
-	try:
-	    print "loading GridHIData"
-	    grp_grid=f["GridHIData"]
-	    self.nslice=grp_grid.attrs["nslice"]
-	    self.nhalo = self.nslice
-	    self.ngrid =grp_grid.attrs["ngrid"]
-	    self.sub_nHI_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
-	    for iii in np.arange(self.nslice):
-	        tmp = np.array(grp_grid[str(iii)])
-	        self.sub_nHI_grid[iii,:,:] = tmp		# need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
-	except:
-	    print "fail."
-	    pass
-
-        try:
-            print "loading GridTotData"
-            grp_grid=f["GridTotData"]
-            self.nslice=grp_grid.attrs["nslice"]
-            self.nhalo = self.nslice
-            self.ngrid =grp_grid.attrs["ngrid"]
-            self.sub_nTotal_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
-            for iii in np.arange(self.nslice):
-                tmp = np.array(grp_grid[str(iii)])
-                self.sub_nTotal_grid[iii,:,:] = tmp                # need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
-        except:
-            print "fail."
-            pass
-
         self.sub_cofm=np.array(grid_file["sub_cofm"])
         self.sub_radii=np.array(grid_file["sub_radii"])
 
         f.close()
         del grid_file
         del f
+
+
+
+	try:
+	    print "loading GridHIData (WARNING NSLICE HARD WIRED!)"
+	    for iii in np.arange(10):	
+	        this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(iii)+'.hdf5'
+	        f=h5py.File(this_savefile,'r')
+	        grp_grid=f["GridHIData"]
+	        self.nslice=grp_grid.attrs["nslice"]
+	        self.nhalo = self.nslice
+	        self.ngrid =grp_grid.attrs["ngrid"]
+	        self.sub_nHI_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+
+	        tmp = np.array(grp_grid[str(iii)])
+	        self.sub_nHI_grid[iii,:,:] = tmp		# need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
+
+		f.close()
+	except:
+	    print "fail."
+	    pass
+
+
+        try:
+            print "loading GridTotData (WARNING NSLICE HARD WIRED!)"
+	    for iii in np.arange(10):
+		this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(iii)+'.hdf5'
+                f=h5py.File(this_savefile,'r')
+                grp_grid=f["GridTotData"]
+                self.nslice=grp_grid.attrs["nslice"]
+                self.nhalo = self.nslice
+                self.ngrid =grp_grid.attrs["ngrid"]
+                self.sub_nTotal_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+
+                tmp = np.array(grp_grid[str(iii)])
+                self.sub_nTotal_grid[iii,:,:] = tmp                # need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
+
+		f.close()
+        except:
+            print "fail."
+            pass
 
 
 
@@ -360,9 +381,9 @@ class BoxHI(HaloHI):
                 mass *= self.hy_mass
             mass *= star.get_reproc_HI(bar)
 
-#        ipos   = ipos[   :10000, :]
-#        smooth = smooth[ :100000   ]
-#        mass   = mass[   :100000   ]
+        ipos   = ipos[   :10000, :]
+        smooth = smooth[ :10000   ]
+        mass   = mass[   :10000   ]
 
 	end_time = time.time()
 
