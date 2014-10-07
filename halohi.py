@@ -611,7 +611,11 @@ class HaloHI:
             tot_f_N = np.sum(array[:,0])
         else:
             tot_f_N = np.histogram(grids[0],np.log10(NHI_table))[0]
+
+	print tot_f_N.shape
         tot_f_N=(tot_f_N)/(width*dX*tot_cells)
+	print tot_f_N.shape
+
         return (center, tot_f_N)
 
     def get_frac(self, threshold=20.3):

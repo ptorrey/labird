@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 """Derived class for computing the integrated HI across the whole box.
+
+   Author:  Simeon Bird
+
+   Modifications:
+   9/10/14  -- Edits by P. Torrey for MPI reading and addition/modification of some LLS specific routines
+
 """
 import numpy as np
 import os.path as path
@@ -47,27 +53,38 @@ class BoxHI(HaloHI):
         self.sub_mass = 10.**12*np.ones(nslice)
         self.nhalo = nslice
         if reload_file:
-            #Otherwise regenerate from the raw data
             self.load_header()
-            #global grid in slices
             self.sub_cofm=0.5*np.ones([nslice,3])
             self.sub_cofm[:,0]=(np.arange(0,nslice)+0.5)/(1.*nslice)*self.box
             self.sub_radii=self.box/2.*np.ones(nslice)
-            #Grid size double softening length
-            #self.ngrid=np.array([int(np.ceil(40*self.npart[1]**(1./3)/self.box*2*rr)) for rr in self.sub_radii])/2.
-            #Grid size constant
             self.ngrid=ngrid*np.ones(self.nhalo)
             self.sub_nHI_grid=np.zeros([self.nhalo, ngrid,ngrid])
 	    self.sub_nTotal_grid=np.zeros([self.nhalo, ngrid,ngrid])
+            self.sub_nZ_grid=np.zeros([self.nhalo, ngrid,ngrid])
+
             try:
                 thisstart = self.load_tmp()
             except IOError:
                 print "Could not load file"
                 thisstart = self.start
 
-            self.set_nHI_grid(False, 0, comm=comm, this_task=this_task, n_tasks=n_tasks )			# want to move this here... no need for halohi...
-	    self.set_nHI_grid(True,  0, comm=comm, this_task=this_task, n_tasks=n_tasks ) 
+            self.set_nHI_grid(gas=False, start=0, comm=comm, this_task=this_task, n_tasks=n_tasks )			# want to move this here... no need for halohi...
+	    comm.Barrier()
+	    if this_task==0:
+	        self.save_nHI_grid(gas=False, this_task=this_task, n_tasks=n_tasks )
 
+	    self.set_nHI_grid(gas=True,  start=0, comm=comm, this_task=this_task, n_tasks=n_tasks ) 
+	    comm.Barrier()
+	    if this_task==0:
+	        self.save_nHI_grid(gas=True, this_task=this_task, n_tasks=n_tasks )
+
+	    self.set_nHI_grid(gas=True,  start=0, metallicity=True, comm=comm, this_task=this_task, n_tasks=n_tasks )
+	    comm.Barrier()
+	    if this_task==0:
+		self.sub_nZ_grid[ self.sub_nZ_grid < -30 ] = -30
+		self.sub_nZ_grid[ np.isnan(self.sub_nZ_grid) ] = -30
+	        self.save_nHI_grid(gas=True, metallicity=True, this_task=this_task, n_tasks=n_tasks )
+	  
 
 	    print "saving file with full grid.  This could take a while if using the whole grid!"
 	    if this_task==0:
@@ -83,6 +100,48 @@ class BoxHI(HaloHI):
 	    print "loading from save file"
             self.load_savefile(self.savefile)
         return
+
+
+    def save_nHI_grid(self, gas=False, metallicity=False, this_task=0, n_tasks=1):
+        try:
+            self.sub_nHI_grid
+        except AttributeError:
+            self.load_hi_grid()
+
+        for i in xrange(0,self.nhalo):
+#	    if ((i % n_tasks) == this_task):		# this wont work until we take Reduce -> AllReduce in grid comm step
+							# note also the this_task==0 condition before this routine is called...
+
+                try:
+		    if gas:
+			if metallicity:
+			    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Z_'+str(i)+'.hdf5'
+                            f=h5py.File(this_savefile,'w')
+                            grp_grid = f.create_group("GridZData")
+                            grp_grid.attrs["nslice"]    = self.nhalo
+                            grp_grid.attrs["ngrid"]     = self.ngrid
+                            grp_grid.create_dataset(str(i),data=self.sub_nZ_grid[i].astype('f4'))
+                            f.close()
+			else:
+                            this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(i)+'.hdf5'
+                            f=h5py.File(this_savefile,'w')
+                            grp_grid = f.create_group("GridTotData")
+                            grp_grid.attrs["nslice"]    = self.nhalo
+                            grp_grid.attrs["ngrid"]     = self.ngrid
+                            grp_grid.create_dataset(str(i),data=self.sub_nTotal_grid[i].astype('f4'))
+                            f.close()
+	    	    else:
+                        this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(i)+'.hdf5'
+                        f=h5py.File(this_savefile,'w')
+                        grp_grid = f.create_group("GridHIData")
+                        grp_grid.attrs["nslice"]    = self.nhalo
+                        grp_grid.attrs["ngrid"]     = self.ngrid
+                        grp_grid.create_dataset(str(i),data=self.sub_nHI_grid[i].astype('f4'))
+                        f.close()
+
+                except AttributeError:
+                    print "failed to write GridData"
+                    pass
 
 
     def save_file(self, save_grid=True, LLS_cut = 17., DLA_cut = 20.3):
@@ -118,40 +177,6 @@ class BoxHI(HaloHI):
 
 	f.close()
 
-        if save_grid:
-            try:
-                self.sub_nHI_grid
-            except AttributeError:
-                self.load_hi_grid()
-
-            for i in xrange(0,self.nhalo):
-                try:
-		    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(i)+'.hdf5'
-
-		    f=h5py.File(this_savefile,'w')
-		    grp_grid = f.create_group("GridHIData")
-		    grp_grid.attrs["nslice"]	= self.nhalo
-		    grp_grid.attrs["ngrid"]	= self.ngrid
-                    grp_grid.create_dataset(str(i),data=self.sub_nHI_grid[i].astype('f4'))
-		    f.close()
-
-                except AttributeError:
-		    print "failed to write GridHIData"
-                    pass
-
-	    for i in xrange(0,self.nhalo):
-                try:
-                    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(i)+'.hdf5'
-                    f=h5py.File(this_savefile,'w')
-		    grp_grid = f.create_group("GridTotData")
-		    grp_grid.attrs["nslice"]    = self.nhalo
-                    grp_grid.attrs["ngrid"]     = self.ngrid
-                    grp_grid.create_dataset(str(i),data=self.sub_nTotal_grid[i].astype('f4'))
-		    f.close()
-                except AttributeError:
-                    pass
-
-
         #Save a list of DLA positions instead
         f=h5py.File(self.savefile,'r+')
         ind = np.where(self.sub_nHI_grid > DLA_cut)
@@ -172,9 +197,6 @@ class BoxHI(HaloHI):
         except IOError:
             raise IOError("Could not open "+savefile)
         grid_file=f["HaloData"]
-        #if  not (grid_file.attrs["minpart"] == self.minpart):
-        #    raise KeyError("File not for this structure")
-        #Otherwise...
         self.redshift=grid_file.attrs["redshift"]
         self.omegam=grid_file.attrs["omegam"]
         self.omegal=grid_file.attrs["omegal"]
@@ -208,15 +230,20 @@ class BoxHI(HaloHI):
 
 
 	try:
-	    print "loading GridHIData (WARNING NSLICE HARD WIRED!)"
-	    for iii in np.arange(10):	
+	    print "loading GridHIData "
+	    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(0)+'.hdf5'
+	    f=h5py.File(this_savefile,'r')
+	    grp_grid=f["GridHIData"]
+            self.nhalo = grp_grid.attrs["nslice"]
+            self.ngrid = grp_grid.attrs["ngrid"]
+	    self.sub_nHI_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+	    f.close()
+
+	    for iii in np.arange(self.nhalo):	
+		print iii
 	        this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.HI_'+str(iii)+'.hdf5'
 	        f=h5py.File(this_savefile,'r')
 	        grp_grid=f["GridHIData"]
-	        self.nslice=grp_grid.attrs["nslice"]
-	        self.nhalo = self.nslice
-	        self.ngrid =grp_grid.attrs["ngrid"]
-	        self.sub_nHI_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
 
 	        tmp = np.array(grp_grid[str(iii)])
 	        self.sub_nHI_grid[iii,:,:] = tmp		# need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
@@ -229,14 +256,19 @@ class BoxHI(HaloHI):
 
         try:
             print "loading GridTotData (WARNING NSLICE HARD WIRED!)"
-	    for iii in np.arange(10):
+	    this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(0)+'.hdf5'
+            f=h5py.File(this_savefile,'r')
+            grp_grid=f["GridTotData"]
+            self.nhalo = grp_grid.attrs["nslice"]
+            self.ngrid = grp_grid.attrs["ngrid"]
+            self.sub_nTotal_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+            f.close()
+
+	    for iii in np.arange(self.nhalo):
+		print iii
 		this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Total_'+str(iii)+'.hdf5'
                 f=h5py.File(this_savefile,'r')
                 grp_grid=f["GridTotData"]
-                self.nslice=grp_grid.attrs["nslice"]
-                self.nhalo = self.nslice
-                self.ngrid =grp_grid.attrs["ngrid"]
-                self.sub_nTotal_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
 
                 tmp = np.array(grp_grid[str(iii)])
                 self.sub_nTotal_grid[iii,:,:] = tmp                # need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
@@ -246,11 +278,32 @@ class BoxHI(HaloHI):
             print "fail."
             pass
 
+        try:
+            print "loading GridZData"
+            this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Z_'+str(0)+'.hdf5'
+            f=h5py.File(this_savefile,'r')
+            grp_grid=f["GridZData"]
+            self.nhalo = grp_grid.attrs["nslice"]
+            self.ngrid = grp_grid.attrs["ngrid"]
+            self.sub_nZ_grid=np.zeros([self.nhalo, self.ngrid[0], self.ngrid[0] ])
+            f.close()
 
+            for iii in np.arange(self.nhalo):
+                print iii
+                this_savefile=self.savefile[  : self.savefile.index('H2')+2]+'.Z_'+str(iii)+'.hdf5'
+                f=h5py.File(this_savefile,'r')
+                grp_grid=f["GridZData"]
 
+                tmp = np.array(grp_grid[str(iii)])
+                self.sub_nZ_grid[iii,:,:] = tmp                # need to fill in slice-by-slice.  Means I need to set once I figure out "nhaloes" (really nslices)
+
+                f.close()
+        except:
+            print "fail."
+            pass
 
 #===============================#
-    def rho_LLS(self, thresh=17.5):
+    def rho_LLS(self, thresh=17.0):
         """Compute rho_LLS, the sum of the mass in DLAs. 
            Units are 10^8 M_sun / Mpc^3 (comoving), like 0811.2003
         """
@@ -262,47 +315,45 @@ class BoxHI(HaloHI):
             self.Rho_LLS = rho_LLS / conv
             return rho_LLS / conv
 
-    def omega_LLS(self, thresh=17.5, upthresh=20.3, fact=1, gas=False):
-        """Compute Omega_LLS, the sum of the neutral gas in LLSs, divided by the critical density.
+    def omega_LLS(self, thresh=17.0, upthresh=20.3, fact=1, gas=False, zup=100.0, zdown=-1000.0):
+        """Compute Omega_LLS, the sum of the neutral (or total, if gas=True) gas in LLSs, divided by the critical density.
             Ω_LLS =  m_p * avg. column density / (1+z)^2 / length of column / rho_c / X_H
             Note: If we want the neutral hydrogen density rather than the gas hydrogen density, multiply by 0.76,
             the hydrogen mass fraction.			 """
 
-	val = fact*self._rho_LLS(thresh=thresh, upthresh=upthresh, gas=gas)/self.rho_crit()		# gas=False=neutral H, gas=true=tot gas mass
+	val = fact*self._rho_LLS(thresh=thresh, upthresh=upthresh, gas=gas, zup=zup, zdown=zdown)/self.rho_crit()		# gas=False=neutral H, gas=true=tot gas mass
 	if gas:
 	    self.Omega_LLS_tot=val
 	else:
 	    self.Omega_LLS = val
 
-#        omega_LLS=fact*self._rho_LLS(thresh=thresh, upthresh=upthresh)/self.rho_crit()		#Avg density in g/cm^3 (comoving) divided by critical density in g/cm^3
-#	omega_LLS_tot=fact*self._rho_LLS(thresh=thresh, upthresh=upthresh, gas=True)/self.rho_crit()
-#        self.Omega_LLS = omega_LLS
-#	self.Omega_LLS_tot = omega_LLS_tot
         return val
 
 
-    def _rho_LLS(self, thresh=17.5, upthresh=20.3, gas=False):
+    def _rho_LLS(self, thresh=17.0, upthresh=20.3, gas=False, zup=100.0, zdown=-100.0):
         """Find the average density in DLAs in g/cm^3 (comoving). Helper for omega_DLA and rho_DLA."""
         #Average column density of HI in atoms cm^-2 (physical)
         try:
             self.sub_nHI_grid
         except AttributeError:
+	    print "did not find nHI grid, need to load...."
             self.load_hi_grid()
+
         if thresh > 0:
 	    condition_grid=self.sub_nHI_grid
 	    if gas:
 		mass_grid=self.sub_nTotal_grid
 	    else:
                 mass_grid=self.sub_nHI_grid
-            HImass = np.sum(10**mass_grid[np.where((condition_grid < upthresh)*(condition_grid > thresh))])/np.size(mass_grid)
+            mass = np.sum(10**mass_grid[np.where((condition_grid < upthresh)*(condition_grid > thresh)*(self.sub_nZ_grid > zdown)*(self.sub_nZ_grid < zup))])/np.size(mass_grid)
         else:
-            HImass = np.mean(10**self.sub_nHI_grid)
-        HImass = self.protonmass * HImass/(1+self.redshift)**2			# Avg. Column density of HI in g cm^-2 (comoving)
+            mass = np.mean(10**self.sub_nHI_grid)
+        mass *= self.protonmass /(1+self.redshift)**2			# Avg. Column density of HI in g cm^-2 (comoving)
         length = (self.box*self.UnitLength_in_cm/self.hubble/self.nhalo)	#Length of column in comoving cm
-        return HImass/length							#Avg density in g/cm^3 (comoving)
+        return mass/length							#Avg density in g/cm^3 (comoving)
 
 
-    def line_density_LLS(self, thresh=17.5):
+    def line_density_LLS(self, thresh=17.0):
         """Compute the line density, the total cells in LLSs divided by the total area, multiplied by d L / dX. This is dN/dX = l_DLA(z)
         """
         #P(hitting a DLA at random)
@@ -312,21 +363,21 @@ class BoxHI(HaloHI):
         self.pLLS = pLLS
         return pLLS
 
-    def line_density2_LLS(self,thresh=17.5):
+    def line_density2_LLS(self,thresh=17.0, upthresh=20.3):
         """Compute the line density the other way, by summing the cddf. This is dN/dX = l_LLS(z)"""
-        (_,  fN) = self.column_density_function(minN=thresh,maxN=20.3)
-        NHI_table = 10**np.arange(thresh, 20.3, 0.2)
+        (_,  fN) = self.column_density_function(minN=thresh,maxN=upthresh)
+        NHI_table = 10**np.arange(thresh, upthresh, 0.2)
         width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
         return np.sum(fN*width)
 
-    def omega_LLS2(self,thresh=17.5):
+    def omega_LLS2(self,thresh=17.0, upthresh=20.3, fact=1.0, dlogN=0.2):
         """Compute Omega_LLS the other way, by summing the cddf."""
-        (center,  fN) = self.column_density_function(minN=thresh,maxN=20.3)
+        (center,  fN) = self.column_density_function(minN=thresh,maxN=upthresh, dlogN=dlogN)	  
         #f_N* NHI is returned, in amu/cm^2/dX
-        NHI_table = 10**np.arange(thresh, 20.3, 0.2)
-        width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
+        NHI_table = 10**np.arange(thresh, upthresh, dlogN)
+        width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])			# this guy has shape of 16
         dXdcm = self.absorption_distance()/((self.box/self.nhalo)*self.UnitLength_in_cm/self.hubble)
-        return 1000*self.protonmass*np.sum(fN*center*width)*dXdcm/self.rho_crit()/(1+self.redshift)**2
+        return fact*self.protonmass*np.sum(fN*center*width)*dXdcm/self.rho_crit()/(1+self.redshift)**2
 
 #==================================#
     def _find_particles_in_slab(self,ii,ipos,ismooth, mHI):
@@ -365,7 +416,7 @@ class BoxHI(HaloHI):
         print "Successfully loaded tmp file. Next to do is:",location+1
         return location+1
 
-    def _set_nHI_grid_single_file(self, file, gas=False):
+    def _set_nHI_grid_single_file(self, file, gas=False, metallicity=False):
 	star=cold_gas.RahmatiRT(self.redshift, self.hubble, molec=self.molec)
 
 	start_time = time.time()
@@ -380,10 +431,16 @@ class BoxHI(HaloHI):
             except KeyError:
                 mass *= self.hy_mass
             mass *= star.get_reproc_HI(bar)
+	else:
+	    if metallicity:
+		try:
+		    mass *= np.array(bar["GFM_Metallicity"])
+		except:
+		    mass *= 0.0127
 
-        ipos   = ipos[   :10000, :]
-        smooth = smooth[ :10000   ]
-        mass   = mass[   :10000   ]
+#        ipos   = ipos[   :10000, :]
+#        smooth = smooth[ :10000   ]
+#        mass   = mass[   :10000   ]
 
 	end_time = time.time()
 
@@ -392,61 +449,59 @@ class BoxHI(HaloHI):
 	if not gas:		# normal, neutral hydrogen projections
             [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nHI_grid) for ii in xrange(0,self.nhalo)]
 	else:
-	    [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nTotal_grid) for ii in xrange(0,self.nhalo)]
+	    if metallicity:
+		[self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nZ_grid) for ii in xrange(0,self.nhalo)]
+	    else:
+	        [self.sub_gridize_single_file(ii,ipos,smooth,mass,self.sub_nTotal_grid) for ii in xrange(0,self.nhalo)]
 
         f.close()
         del ipos
         del mass
         del smooth
 
-    def set_nHI_grid(self, gas=False, start=0, comm=None, this_task=0, n_tasks=1):
+
+    def set_nHI_grid(self, gas=False, metallicity=False, start=0, comm=None, this_task=0, n_tasks=1):
         """Set up the grid around each halo where the HI is calculated.
         """
         self.once=True
         files = hdfsim.get_all_files(self.snapnum, self.snap_dir)
         files.reverse()
         end = np.min([np.size(files),self.end])
+
         for xx in xrange(start, end):
-          if ((xx % n_tasks) == this_task):
-            ff = files[xx]
-	    print "Starting file "+str(ff)+" for nHI grid setup on task "+str(this_task)
-	    self._set_nHI_grid_single_file(ff, gas=gas)
+            if ((xx % n_tasks) == this_task):
+                ff = files[xx]
+	        print "Starting file "+str(ff)+" for nHI grid setup on task "+str(this_task)
+	        self._set_nHI_grid_single_file(ff, gas=gas, metallicity=metallicity)
+
 
 	print "task "+str(this_task)+" ready for MPI comm..."
 	comm.Barrier()
 
 	print self.sub_nHI_grid.shape
 
-	if 1:
-	    for this_slice in np.arange(self.nhalo):				# for each slice	
-		if not gas:
-		    local_grid   = self.sub_nHI_grid[this_slice,:,:]
+	for this_slice in np.arange(self.nhalo):				# for each slice	
+	    if not gas:
+		local_grid   = self.sub_nHI_grid[this_slice,:,:]
+	    else:
+		if metallicity:
+		    local_grid   = self.sub_nZ_grid[this_slice,:,:]
 		else:
 		    local_grid   = self.sub_nTotal_grid[this_slice,:,:]
 
-                global_grid  = np.zeros( (self.ngrid[this_slice], self.ngrid[this_slice]) )		# create a global grid
-                comm.Barrier()
-#		comm.Allreduce(local_grid ,     global_grid,	op=MPI.SUM)	# dont need an Allreduce, reduce should work fine if rest is done on root
-		comm.Reduce(   local_grid ,	global_grid,	op=MPI.SUM,  root=0)
+            global_grid  = np.zeros( (self.ngrid[this_slice], self.ngrid[this_slice]) )		# create a global grid
+            comm.Barrier()
+	    comm.Reduce(   local_grid ,	global_grid,	op=MPI.SUM,  root=0)
 
-		if this_task==0:
-                  if not gas:         # normal operation, looking at neutral hydrogen only
+	    if this_task==0:
+                if not gas:         # normal operation, looking at neutral hydrogen only
                     self.sub_nHI_grid[this_slice,:,:] = global_grid		# only makes sense for root task, but can be done for all
-                  else:
-                    self.sub_nTotal_grid[this_slice,:,:] = global_grid
+                else:
+		    if metallicity:
+			self.sub_nZ_grid[this_slice,:,:] = global_grid
+		    else:
+                        self.sub_nTotal_grid[this_slice,:,:] = global_grid
 
-
-	else:
-            global_grid  = np.zeros( self.sub_nHI_grid.shape )
-	    comm.Barrier()
-	    print "passed barrier, starting comm..."
-
-	    if not gas:		# normal operation, looking at neutral hydrogen only
-                comm.Allreduce(self.sub_nHI_grid ,               global_grid,                   op=MPI.SUM)
-	        self.sub_nHI_grid = global_grid
-	    else:
-	        comm.Allreduce(self.sub_nTotal_grid ,            global_grid,                   op=MPI.SUM)
-	        self.sub_nTotal_grid = global_grid
 
 
 	if this_task==0:
@@ -455,20 +510,25 @@ class BoxHI(HaloHI):
             #Also fix the units:
             #we calculated things in internal gadget /cell and we want atoms/cm^2
             #So the conversion is mass/(cm/cell)^2
-	    if not gas:
-                for ii in xrange(0,self.nhalo):
-                    massg=self.UnitMass_in_g/self.hubble/self.protonmass
-                    epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
+
+	    massg=self.UnitMass_in_g/self.hubble/self.protonmass
+	    for ii in xrange(0,self.nhalo):
+	        epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
+	        if not gas:
                     self.sub_nHI_grid[ii]*=(massg/epsilon**2)
                     self.sub_nHI_grid[ii]+=0.1
                     np.log10(self.sub_nHI_grid[ii],self.sub_nHI_grid[ii])
-	    else:
-	        for ii in xrange(0,self.nhalo):
-                    massg=self.UnitMass_in_g/self.hubble/self.protonmass
-                    epsilon=2.*self.sub_radii[ii]/(self.ngrid[ii])*self.UnitLength_in_cm/self.hubble/(1+self.redshift)
-                    self.sub_nTotal_grid[ii]*=(massg/epsilon**2)
-                    self.sub_nTotal_grid[ii]+=0.1
-                    np.log10(self.sub_nTotal_grid[ii],self.sub_nTotal_grid[ii])
+	        else:
+		    if metallicity:
+                        self.sub_nZ_grid[ii]*=(massg/epsilon**2)
+                        self.sub_nZ_grid[ii]+=0.2
+
+			self.sub_nZ_grid[ii] /= 10.0**(self.sub_nTotal_grid[ii])
+                        np.log10(self.sub_nZ_grid[ii],self.sub_nZ_grid[ii])
+		    else:
+                        self.sub_nTotal_grid[ii]*=(massg/epsilon**2)
+                        self.sub_nTotal_grid[ii]+=0.1
+                        np.log10(self.sub_nTotal_grid[ii],self.sub_nTotal_grid[ii])
 
 	print "done with nHI loading routine..."
 	
@@ -946,7 +1006,7 @@ class BoxHI(HaloHI):
             dlogN - bin spacing
             minN - minimum log N
             maxN - maximum log N
-            maxM - maximum log M halo mass to consider
+            maxM - maximum log M halo mass to consider		# what does this mean here?
             minM - minimum log M halo mass to consider
 
         Returns:
@@ -973,8 +1033,9 @@ class BoxHI(HaloHI):
         except AttributeError:
             self.load_hi_grid()
             grids = self.sub_nHI_grid
+
         center = np.array([(NHI_table[i]+NHI_table[i+1])/2. for i in range(0,np.size(NHI_table)-1)])
-        width =  np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
+        width  = np.array([NHI_table[i+1]-NHI_table[i] for i in range(0,np.size(NHI_table)-1)])
         #Grid size (in cm^2)
         dX=self.absorption_distance()
         tot_cells = np.sum(self.ngrid**2)
