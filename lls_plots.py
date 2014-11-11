@@ -114,54 +114,50 @@ def plot_column_vs_met(column, met, nbins=100, xmin=14, xmax=22, ymin=-6, ymax=1
 
 
 
+
 def plot_column_map(column, slice=0, nmin=14, nmax=22, savebase='HI_map_slice'):
     
     this_slice=column[slice,:,:]
 
     fig = plt.figure(figsize=(15,15))
 
-    ax1 = fig.add_subplot(1, 2, 1)
-    ax2 = fig.add_subplot(1, 2, 2)
+    ax = fig.add_subplot(1, 1, 1)
+
 
 # first map for low density material
     norm = mpl.colors.Normalize(vmin=10, vmax=nmin)
     cmap = plt.cm.Blues
     mapper = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
     rgba   = mapper.to_rgba(this_slice)
-    rgba[:,:,3] = 0.8
-    ax1.imshow(rgba)
+    rgba[:,:,3] = 0.6
+    ax.imshow(rgba)
 
 # now make LLS and up image with transparent background   
     norm = mpl.colors.Normalize(vmin=nmin, vmax=nmax)
-    cmap = plt.cm.spring
+    cmap = plt.cm.spectral
     mapper = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
     rgba   = mapper.to_rgba(this_slice)
    
     low_pixel_index = this_slice < nmin
     rgba[low_pixel_index,3] = 0.0
-    ax2.imshow(rgba, vmin=nmin, vmax=nmax)    
+    ax.imshow(rgba, vmin=nmin, vmax=nmax)    
 
     position=fig.add_axes([0.85,0.1,0.02,0.8])  ## the parameters are the specified position you set 
 #    plt.imshow(this_slice)
-    cmap = plt.cm.spring
-    cmap = plt.cm.spring
-
     mini_ax = fig.add_axes([0.000, 0.001, 0.000, 0.001])
     dummy = np.zeros( (5,5) )
-    f = mini_ax.imshow(dummy, cmap='spring', vmin=nmin, vmax=nmax)
+    f = mini_ax.imshow(dummy, cmap='spectral', vmin=nmin, vmax=nmax)
     mini_ax.axes.get_xaxis().set_visible(False)
     mini_ax.axes.get_yaxis().set_visible(False)
 
     cbar = plt.colorbar(f, cmap=cmap, cax=position)                #, ticks=np.arange(5)+15)
-    cbar.set_cmap('spring')
+#    cbar.set_cmap('spring')
     cbar.ax.tick_params(labelsize=25)
     cbar.ax.set_ylabel(r'log(N${}_{HI}$ [cm${}^{-2}$])', fontsize=30)
 
 
-    ax1.axes.get_xaxis().set_visible(False)
-    ax1.axes.get_yaxis().set_visible(False)
-    ax2.axes.get_xaxis().set_visible(False)
-    ax2.axes.get_yaxis().set_visible(False)
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
 
 #    position=fig.add_axes([0.85,0.1,0.02,0.8])  ## the parameters are the specified position you set 
 #    position.set_ylabel(r'log(N${}_{HI}$)')
@@ -173,6 +169,55 @@ def plot_column_map(column, slice=0, nmin=14, nmax=22, savebase='HI_map_slice'):
     delta= 0.8
     fig.subplots_adjust(left=left, right=left+delta, top=1.0 - (1.0-delta)/2.0, bottom=(1.0-delta)/2.0 )
   
+    fig.savefig(savebase+'_'+str(slice)+'.pdf', dpi=512)
+
+
+
+
+
+def plot_metallicity_map(column, met, slice=0, ncut=16.5, savebase='met_map', min_met=-5, max_met=0):
+    this_met=np.log10(  (10.0**met[slice,:,:])/0.013 )
+    this_col=column[slice,:,:]
+    fig = plt.figure(figsize=(15,15))
+    ax = fig.add_subplot(1, 1, 1)
+
+    met = np.log10( (10.0**met)/0.013 )
+
+# first map for low density material
+#    norm = mpl.colors.Normalize(vmin=-5, vmax=0)
+#    cmap = plt.cm.spectral
+#    mapper = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+#    rgba   = mapper.to_rgba(this_met)
+#    rgba[:,:,3] = 0.3
+#    ax.imshow(rgba)
+
+# now make LLS and up image with transparent background   
+    norm = mpl.colors.Normalize(vmin=-5, vmax=0)
+    cmap = plt.cm.spectral
+    mapper = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+    rgba   = mapper.to_rgba(this_met)
+    low_pixel_index = this_col < ncut
+    rgba[low_pixel_index,3] = 0.0
+    ax.imshow(rgba, vmin=-5, vmax=0) 
+
+    position=fig.add_axes([0.85,0.1,0.02,0.8])  ## the parameters are the specified position you set 
+    mini_ax = fig.add_axes([0.000, 0.001, 0.000, 0.001])
+    dummy = np.zeros( (5,5) )
+    f = mini_ax.imshow(dummy, cmap='spectral', vmin=-5, vmax=0)
+    mini_ax.axes.get_xaxis().set_visible(False)
+    mini_ax.axes.get_yaxis().set_visible(False)
+
+    cbar = plt.colorbar(f, cmap=cmap, cax=position)                #, ticks=np.arange(5)+15)
+    cbar.ax.tick_params(labelsize=25)
+    cbar.ax.set_ylabel(r'[M/H]', fontsize=30)
+
+    ax.axes.get_xaxis().set_visible(False)
+    ax.axes.get_yaxis().set_visible(False)
+
+    left = 0.03
+    delta= 0.8
+    fig.subplots_adjust(left=left, right=left+delta, top=1.0 - (1.0-delta)/2.0, bottom=(1.0-delta)/2.0 )
+
     fig.savefig(savebase+'_'+str(slice)+'.pdf', dpi=512)
 
 
